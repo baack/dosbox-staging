@@ -50,8 +50,6 @@ using namespace std;
 #define GUS_RATE myGUS.rate
 #define LOG_GUS 0
 
-#define VOL_SHIFT 14
-
 #define WCTRL_STOPPED			0x01
 #define WCTRL_STOP				0x02
 #define WCTRL_16BIT				0x04
@@ -66,7 +64,7 @@ static MixerChannel * gus_chan;
 static Bit8u irqtable[8] = { 0, 2, 5, 3, 7, 11, 12, 15 };
 static Bit8u dmatable[8] = { 0, 1, 3, 5, 6, 7, 0, 0 };
 static Bit8u GUSRam[1024*1024]; // 1024K of GUS Ram
-static std::array<uint16_t, GUS_VOLUME_POSITIONS> vol_scalars = {};
+static std::array<float, GUS_VOLUME_POSITIONS> vol_scalars = {};
 
 struct PanScalar {
 	float left = 0.0f;
@@ -256,9 +254,9 @@ public:
 
 	void WritePanPot(Bit8u val)
 	{
+		assertm(val >= 0 && val <= 15,
+		        "Valid pan positions range from 0 to 15");
 		PanPot = val;
-
-		UpdateVolumes();
 	}
 
 	Bit8u ReadPanPot(void) {
@@ -315,13 +313,6 @@ public:
 			WaveAddr = (WaveCtrl & WCTRL_DECREASING) ? WaveStart : WaveEnd;
 		}
 	}
-	INLINE void UpdateVolumes(void) {
-		assert(CurrentVolIndex < GUS_VOLUME_POSITIONS);
-		VolLeft = static_cast<int32_t>(vol_scalars[CurrentVolIndex] *
-		                               pan_scalars[PanPot].left);
-		VolRight = static_cast<int32_t>(vol_scalars[CurrentVolIndex] *
-		                                pan_scalars[PanPot].right);
-	}
 
 	inline void RampUpdate()
 	{
@@ -336,7 +327,6 @@ public:
 			RemainingVolIndexes = CurrentVolIndex - EndVolIndex;
 		}
 		if (RemainingVolIndexes < 0) {
-			UpdateVolumes();
 			return;
 		}
 		/* Generate an IRQ if needed */
@@ -356,7 +346,6 @@ public:
 			CurrentVolIndex = (RampCtrl & 0x40) ? StartVolIndex
 			                                    : EndVolIndex;
 		}
-		UpdateVolumes();
 	}
 
 	void generateSamples(int32_t *stream, uint32_t len)
@@ -366,9 +355,12 @@ public:
 
 		uint16_t tally = 0;
 		while (tally++ < len) {
-			const float sample = (this->*getSample)();
-			*(stream++) += static_cast<int32_t>(sample * VolLeft);
-			*(stream++) += static_cast<int32_t>(sample * VolRight);
+			const float sample = (this->*getSample)() *
+			                     vol_scalars[CurrentVolIndex];
+			*(stream++) += static_cast<int32_t>(
+			        sample * pan_scalars[PanPot].left);
+			*(stream++) += static_cast<int32_t>(
+			        sample * pan_scalars[PanPot].right);
 			WaveUpdate();
 			RampUpdate();
 		}
@@ -579,7 +571,6 @@ static void ExecuteGlobRegister(void) {
 		if(curchan != NULL) {
 			Bit16u tmpdata = (Bit16u)myGUS.gRegData >> 4;
 			curchan->CurrentVolIndex = tmpdata;
-			curchan->UpdateVolumes();
 		}
 		break;
 	case 0xA:  // Channel MSW current address register
@@ -829,25 +820,20 @@ static void GUS_CallBack(uint16_t len)
 	for (Bitu i = 0; i < myGUS.ActiveChannels; i++) {
 		guschan[i]->generateSamples(buffer[0], len);
 	}
-	for (Bitu i = 0; i < len; i++) {
-		buffer[i][0] >>= VOL_SHIFT;
-		buffer[i][1] >>= VOL_SHIFT;
-	}
 	gus_chan->AddSamples_s32(len, buffer[0]);
 	CheckVoiceIrq();
 }
 
 // Generate logarithmic to linear volume conversion tables
-static void MakeTables(void) {
-	int i;
-	double out = (double)(1 << 13);
-	for (i=4095;i>=0;i--) {
-		vol_scalars[i] = (Bit16s)out;
-		out/=1.002709201;		/* 0.0235 dB Steps */
-		// Original amplification routine in the hardware
-		// vol_scalars[i] = ((256 + i & 0xff) << VOL_SHIFT) / (1 << (24
-		// - (i >> 8)));
+static void PopulateVolScalars(void)
+{
+	// Start with standard RMS power and step down in 0.0235 dB increments
+	double out = sqrt(2) / 2.0;
+	for (uint16_t i = GUS_VOLUME_POSITIONS - 1; i > 0; --i) {
+		vol_scalars[i] = static_cast<float>(out);
+		out /= 1.002709201;
 	}
+	vol_scalars[0] = 0.0f;
 }
 
 /*
@@ -963,8 +949,8 @@ public:
 		WriteHandler[8].Install(0x20B + GUS_BASE,write_gus,IO_MB);
 	
 	//	DmaChannels[myGUS.dma1]->Register_TC_Callback(GUS_DMA_TC_Callback);
-	
-		MakeTables();
+
+		PopulateVolScalars();
 		PopulatePanScalars();
 	
 		for (Bit8u chan_ct=0; chan_ct<32; chan_ct++) {
