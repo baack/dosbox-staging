@@ -1,4 +1,5 @@
 /*
+ *  Copyright (C) 2020-2020  The dosbox-staging team
  *  Copyright (C) 2002-2020  The DOSBox Team
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -44,11 +45,14 @@ using namespace std;
 #define WAVE_MSWMASK ((1 << 16)-1)
 #define WAVE_LSWMASK (0xffffffff ^ WAVE_MSWMASK)
 
-#define GUS_PAN_POSITIONS 16 // 0 face-left, 7 face-forward, and 15 face-right
+#define GUS_CHANNELS         32
+#define GUS_BUFFER_FRAMES    64
+#define GUS_PAN_POSITIONS    16 // 0 face-left, 7 face-forward, and 15 face-right
 #define GUS_VOLUME_POSITIONS 4096
+
 #define GUS_BASE myGUS.portbase
 #define GUS_RATE myGUS.rate
-#define LOG_GUS 0
+#define LOG_GUS  0
 
 #define WCTRL_STOPPED			0x01
 #define WCTRL_STOP				0x02
@@ -99,6 +103,7 @@ struct GFGus {
 		float delay;
 	} timers[2];
 	Bit32u rate;
+	float peak_amplitude = 1.0f;
 	Bitu portbase;
 	Bit8u dma1;
 	Bit8u dma2;
@@ -186,13 +191,12 @@ public:
 		constexpr float to_16 = scale_from_to_as<int8_t, int16_t, float>();
 		// add a fraction of the next sample
 		if (WaveAdd < (1 << WAVE_FRACT)) {
-			constexpr float max_wave = 512.0f; // pow(2, WAVE_FRACT)
 			const uint32_t nextAddr = (useAddr + 1) & (1024 * 1024 - 1);
 			const float w2 = static_cast<float>(
 			        static_cast<int8_t>(GUSRam[nextAddr]));
 			const float diff = w2 - w1;
+			constexpr float max_wave = static_cast<float>(1 << WAVE_FRACT);
 			const float scale = (WaveAddr & WAVE_FRACT_MASK) / max_wave;
-
 			w1 += diff * scale;
 
 			// Ensure the sample with added inter-wave portion is
@@ -219,11 +223,11 @@ public:
 
 		// add a fraction of the next sample
 		if (WaveAdd < (1 << WAVE_FRACT)) {
-			constexpr float max_wave = 512.0f; // pow(2, WAVE_FRACT)
 			const float w2 = static_cast<float>(static_cast<int8_t>(GUSRam[useAddr + 2]) |
 			                 (static_cast<int8_t>(GUSRam[useAddr + 3])
 			                  << 8));
 			const float diff = w2 - w1;
+			constexpr float max_wave = static_cast<float>(1 << WAVE_FRACT);
 			const float scale = (WaveAddr & WAVE_FRACT_MASK) / max_wave;
 			w1 += diff * scale;
 
@@ -348,19 +352,18 @@ public:
 		}
 	}
 
-	void generateSamples(int32_t *stream, uint32_t len)
+	void generateSamples(float *stream, float &peak, uint16_t len)
 	{
 		if (RampCtrl & WaveCtrl & 3) // Channel is disabled
 			return;
 
-		uint16_t tally = 0;
-		while (tally++ < len) {
+		while (len-- > 0) {
 			const float sample = (this->*getSample)() *
 			                     vol_scalars[CurrentVolIndex];
-			*(stream++) += static_cast<int32_t>(
-			        sample * pan_scalars[PanPot].left);
-			*(stream++) += static_cast<int32_t>(
-			        sample * pan_scalars[PanPot].right);
+			*(stream++) += sample * pan_scalars[PanPot].left;
+			*(stream++) += sample * pan_scalars[PanPot].right;
+			peak = std::max(peak, std::max(fabs(stream[-1]),
+			                               fabs(stream[-2])));
 			WaveUpdate();
 			RampUpdate();
 		}
@@ -382,7 +385,7 @@ void GUSChannels::WriteWaveCtrl(uint8_t val)
 		CheckVoiceIrq();
 }
 
-static GUSChannels *guschan[32];
+static std::array<GUSChannels *, GUS_CHANNELS> guschan = {};
 static GUSChannels *curchan;
 
 static void GUSReset(void) {
@@ -413,6 +416,7 @@ static void GUSReset(void) {
 			guschan[i]->WritePanPot(0x7);
 		}
 		myGUS.IRQChan = 0;
+		myGUS.peak_amplitude = 1.0f;
 	}
 	if ((myGUS.gRegData & 0x4) != 0) {
 		myGUS.irqenabled = true;
@@ -814,13 +818,22 @@ static void GUS_DMA_Callback(DmaChannel * chan,DMAEvent event) {
 
 static void GUS_CallBack(uint16_t len)
 {
-	Bit32s buffer[MIXER_BUFSIZE][2];
-	memset(buffer, 0, len * sizeof(buffer[0]));
+	assert(len <= GUS_BUFFER_FRAMES);
 
-	for (Bitu i = 0; i < myGUS.ActiveChannels; i++) {
-		guschan[i]->generateSamples(buffer[0], len);
-	}
-	gus_chan->AddSamples_s32(len, buffer[0]);
+	float accumulator[GUS_BUFFER_FRAMES][2] = {{0}};
+	for (uint8_t i = 0; i < myGUS.ActiveChannels; ++i)
+		guschan[i]->generateSamples(*accumulator, myGUS.peak_amplitude, len);
+
+	const float dampener = std::numeric_limits<int16_t>::max() /
+	                       myGUS.peak_amplitude;
+
+	int16_t scaled[GUS_BUFFER_FRAMES][2];
+	for (uint8_t i = 0; i < len; ++i)
+		for (uint8_t j = 0; j < 2; ++j)
+			scaled[i][j] = static_cast<int16_t>(
+			        dampener < 1 ? accumulator[i][j] * dampener
+			                     : accumulator[i][j]);
+	gus_chan->AddSamples_s16(len, scaled[0]);
 	CheckVoiceIrq();
 }
 
