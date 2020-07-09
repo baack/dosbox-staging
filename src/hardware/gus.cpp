@@ -45,11 +45,12 @@ using namespace std;
 #define WAVE_MSWMASK    ((1 << 16) - 1)
 #define WAVE_LSWMASK    (0xffffffff ^ WAVE_MSWMASK)
 
-#define GUS_CHANNELS         32
-#define GUS_BUFFER_FRAMES    64
-#define GUS_PAN_POSITIONS    16 // 0 face-left, 7 face-forward, and 15 face-right
-#define GUS_VOLUME_POSITIONS 4096
-#define GUS_RAM_SIZE         1048576 // 1 MB
+#define GUS_MIN_CHANNELS     14u
+#define GUS_MAX_CHANNELS     32u
+#define GUS_BUFFER_FRAMES    64u
+#define GUS_PAN_POSITIONS    16u // 0 face-left, 7 face-forward, and 15 face-right
+#define GUS_VOLUME_POSITIONS 4096u
+#define GUS_RAM_SIZE         1048576u // 1 MB
 #define GUS_BASE             myGUS.portbase
 #define LOG_GUS              0
 
@@ -103,10 +104,13 @@ struct GFGus {
 	} timers[2];
 
 	uint32_t rate = 0u;
-	float peak_amplitude = 1.0f;
 	Bitu portbase = 0u;
 	uint8_t dma1 = 0u;
 	uint8_t dma2 = 0u;
+
+	float peak_amplitude = 1.0f;
+	uint32_t stats_8bit_writes = 0u;
+	uint32_t stats_16bit_writes = 0u;
 
 	uint8_t irq1 = 0u;
 	uint8_t irq2 = 0u;
@@ -372,8 +376,13 @@ void GUSChannels::WriteWaveCtrl(uint8_t val)
 {
 	const uint32_t oldirq = myGUS.WaveIRQ;
 	WaveCtrl = val & 0x7f;
-	getSample = (WaveCtrl & WCTRL_16BIT) ? &GUSChannels::GetSample16
-	                                     : &GUSChannels::GetSample8;
+	if (WaveCtrl & WCTRL_16BIT) {
+		getSample = &GUSChannels::GetSample16;
+		myGUS.stats_16bit_writes++;
+	} else {
+		getSample = &GUSChannels::GetSample8;
+		myGUS.stats_8bit_writes++;
+	}
 
 	if ((val & 0xa0) == 0xa0)
 		myGUS.WaveIRQ |= irqmask;
@@ -383,8 +392,45 @@ void GUSChannels::WriteWaveCtrl(uint8_t val)
 		CheckVoiceIrq();
 }
 
-static std::array<GUSChannels *, GUS_CHANNELS> guschan = {nullptr};
+static std::array<GUSChannels *, GUS_MAX_CHANNELS> guschan = {nullptr};
 static GUSChannels *curchan = nullptr;
+
+static void PrintStats()
+{
+	// Do we have at least 10 seconds worth of playback?
+	const uint32_t combined_writes = myGUS.stats_8bit_writes +
+	                                 myGUS.stats_16bit_writes;
+	if (combined_writes < 30 || myGUS.peak_amplitude < 5)
+		return;
+
+	std::string makeup = "";
+	if (myGUS.stats_16bit_writes == 0u)
+		makeup = "8-bit samples";
+	else if (myGUS.stats_8bit_writes == 0u)
+		makeup = "16-bit samples";
+	else {
+		const uint8_t ratio_8bit = ceil_udivide(100u * myGUS.stats_8bit_writes,
+		                                        combined_writes);
+		const uint8_t ratio_16bit = ceil_udivide(100u * myGUS.stats_16bit_writes,
+		                                         combined_writes);
+		makeup = std::to_string(ratio_8bit) + "% 8-bit and " +
+		         std::to_string(ratio_16bit) + "% 16-bit samples";
+	}
+	LOG_MSG("GUS: Audio was made up of %s", makeup.c_str());
+
+	const float mixer_scalar = gus_chan ? std::max(gus_chan->volmain[0], gus_chan->volmain[1]) : 1.0f;
+	const double peak_ratio = mixer_scalar * myGUS.peak_amplitude /
+	                          std::numeric_limits<int16_t>::max();
+	std::string suggestion = "";
+	// Make a suggestion if the audio only reached 70% of max
+	if (peak_ratio < 0.7) {
+		const auto multiplier = static_cast<uint16_t>(100 / peak_ratio);
+		suggestion = ", consider using: mixer gus " +
+		             std::to_string(multiplier);
+	}
+	LOG_MSG("GUS: Peak amplitude reached %.0f%% of max%s", 100 * peak_ratio,
+	        suggestion.c_str());
+}
 
 static void GUSReset()
 {
@@ -414,13 +460,18 @@ static void GUSReset()
 	}
 	myGUS.gCurChannel = 0u;
 	myGUS.IRQChan = 0;
-	myGUS.peak_amplitude = 1.0f;
 
 	if ((myGUS.gRegData & 0x4) != 0) {
 		myGUS.irqenabled = true;
 	} else {
 		myGUS.irqenabled = false;
 	}
+	// Print and reset running stats
+	PrintStats();
+	myGUS.peak_amplitude = 1.0f;
+	myGUS.stats_8bit_writes = 0u;
+	myGUS.stats_16bit_writes = 0u;
+
 	// Clear the registers
 	myGUS.gRegSelect = 0u;
 	myGUS.gRegData = 0u;
@@ -633,21 +684,30 @@ static void ExecuteGlobRegister()
 	case 0xE: // Set active channel register
 		myGUS.gRegSelect = myGUS.gRegData >> 8; // JAZZ Jackrabbit seems
 		                                        // to assume this?
-		myGUS.ActiveChannels = 1 + ((myGUS.gRegData >> 8) & 63);
-		if (myGUS.ActiveChannels < 14)
-			myGUS.ActiveChannels = 14;
-		if (myGUS.ActiveChannels > 32)
-			myGUS.ActiveChannels = 32;
-		myGUS.ActiveMask = 0xffffffffU >> (32 - myGUS.ActiveChannels);
-		myGUS.basefreq = static_cast<uint32_t>(
-		        0.5 + 1000000.0 / (1.619695497 *
-		                           (double)(myGUS.ActiveChannels)));
-		gus_chan->SetFreq(myGUS.basefreq);
-		for (uint8_t i = 0; i < myGUS.ActiveChannels; i++)
-			guschan[i]->UpdateWaveRamp();
-		gus_chan->Enable(true);
-		DEBUG_LOG_MSG("GUS: Activated %u voices running at %u Hz",
-		              myGUS.ActiveChannels, myGUS.basefreq);
+		{
+			const unsigned requested_voices = 1 + ((myGUS.gRegData >> 8) &
+			                                      63);
+			const bool was_changed = requested_voices !=
+			                         myGUS.ActiveChannels;
+			myGUS.ActiveChannels = clamp(requested_voices,
+			                             GUS_MIN_CHANNELS,
+			                             GUS_MAX_CHANNELS);
+			myGUS.ActiveMask = 0xffffffffU >> (32 - myGUS.ActiveChannels);
+			myGUS.basefreq = static_cast<uint32_t>(
+			        0.5 + 1000000.0 / (1.619695497 *
+			                           (double)(myGUS.ActiveChannels)));
+			gus_chan->SetFreq(myGUS.basefreq);
+			for (uint8_t i = 0; i < myGUS.ActiveChannels; i++)
+				guschan[i]->UpdateWaveRamp();
+
+			// Only print if the voice-count has changed
+			if (was_changed)
+				DEBUG_LOG_MSG("GUS: Activated %u voices "
+				              "running at %u "
+				              "Hz",
+				              myGUS.ActiveChannels, myGUS.basefreq);
+			gus_chan->Enable(true);
+		}
 
 		break;
 	case 0x10: // Undocumented register used in Fast Tracker 2
