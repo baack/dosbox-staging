@@ -78,7 +78,7 @@ struct PanScalar {
 static std::array<PanScalar, GUS_PAN_POSITIONS> pan_scalars = {};
 
 class GUSChannels;
-static void CheckVoiceIrq(void);
+static void CheckVoiceIrq();
 
 struct GFGus {
 	uint8_t gRegSelect = 0u;
@@ -121,7 +121,7 @@ struct GFGus {
 	uint32_t WaveIRQ = 0u;
 } myGUS;
 
-Bitu DEBUG_EnableDebugger(void);
+Bitu DEBUG_EnableDebugger();
 
 static void GUS_DMA_Callback(DmaChannel * chan,DMAEvent event);
 
@@ -254,7 +254,8 @@ public:
 			ret |= 0x80;
 		return ret;
 	}
-	void UpdateWaveRamp(void) { 
+	void UpdateWaveRamp()
+	{
 		WriteWaveFreq(WaveFreq);
 		WriteRampRate(RampRate);
 	}
@@ -266,7 +267,7 @@ public:
 		PanPot = val;
 	}
 
-	uint8_t ReadPanPot(void) { return PanPot; }
+	uint8_t ReadPanPot() { return PanPot; }
 	void WriteRampCtrl(uint8_t val)
 	{
 		uint32_t old = myGUS.RampIRQ;
@@ -279,7 +280,7 @@ public:
 		if (old != myGUS.RampIRQ) 
 			CheckVoiceIrq();
 	}
-	INLINE uint8_t ReadRampCtrl(void)
+	INLINE uint8_t ReadRampCtrl()
 	{
 		uint8_t ret = RampCtrl;
 		if (myGUS.RampIRQ & irqmask)
@@ -293,7 +294,8 @@ public:
 		double realadd = frameadd*(double)myGUS.basefreq/(double)GUS_RATE;
 		IncrVolIndex = static_cast<uint32_t>(realadd);
 	}
-	INLINE void WaveUpdate(void) {
+	INLINE void WaveUpdate()
+	{
 		if (WaveCtrl & ( WCTRL_STOP | WCTRL_STOPPED)) return;
 		int32_t WaveLeft;
 		if (WaveCtrl & WCTRL_DECREASING) {
@@ -393,7 +395,8 @@ void GUSChannels::WriteWaveCtrl(uint8_t val)
 static std::array<GUSChannels *, GUS_CHANNELS> guschan = {};
 static GUSChannels *curchan;
 
-static void GUSReset(void) {
+static void GUSReset()
+{
 	if((myGUS.gRegData & 0x1) == 0x1) {
 		// Reset
 		adlib_commandreg = 85;
@@ -430,13 +433,14 @@ static void GUSReset(void) {
 	}
 }
 
-static INLINE void GUS_CheckIRQ(void) {
+static INLINE void GUS_CheckIRQ()
+{
 	if (myGUS.IRQStatus && (myGUS.mixControl & 0x08)) 
 		PIC_ActivateIRQ(myGUS.irq1);
-
 }
 
-static void CheckVoiceIrq(void) {
+static void CheckVoiceIrq()
+{
 	myGUS.IRQStatus&=0x9f;
 	Bitu totalmask=(myGUS.RampIRQ|myGUS.WaveIRQ) & myGUS.ActiveMask;
 	if (!totalmask) return;
@@ -528,8 +532,8 @@ static void GUS_TimerEvent(Bitu val) {
 		PIC_AddEvent(GUS_TimerEvent,myGUS.timers[val].delay,val);
 }
 
- 
-static void ExecuteGlobRegister(void) {
+static void ExecuteGlobRegister()
+{
 	int i;
 //	if (myGUS.gRegSelect|1!=0x44) LOG_MSG("write global register %x with %x", myGUS.gRegSelect, myGUS.gRegData);
 	switch(myGUS.gRegSelect) {
@@ -678,7 +682,6 @@ static void ExecuteGlobRegister(void) {
 	}
 	return;
 }
-
 
 static Bitu read_gus(Bitu port,Bitu iolen) {
 //	LOG_MSG("read from gus port %x",port);
@@ -861,7 +864,7 @@ static void GUS_CallBack(uint16_t len)
 }
 
 // Generate logarithmic to linear volume conversion tables
-static void PopulateVolScalars(void)
+static void PopulateVolScalars()
 {
 	// Start with standard RMS power and step down in 0.0235 dB increments
 	double out = sqrt(2) / 2.0;
