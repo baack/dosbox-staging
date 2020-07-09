@@ -388,39 +388,42 @@ static GUSChannels *curchan = nullptr;
 
 static void GUSReset()
 {
-	if ((myGUS.gRegData & 0x1) == 0x1) {
-		// Reset
-		adlib_commandreg = 85;
-		myGUS.IRQStatus = 0;
-		myGUS.timers[0].raiseirq = false;
-		myGUS.timers[1].raiseirq = false;
-		myGUS.timers[0].reached = false;
-		myGUS.timers[1].reached = false;
-		myGUS.timers[0].running = false;
-		myGUS.timers[1].running = false;
+	// Reset
+	adlib_commandreg = 85;
+	myGUS.IRQStatus = 0;
+	myGUS.timers[0].raiseirq = false;
+	myGUS.timers[1].raiseirq = false;
+	myGUS.timers[0].reached = false;
+	myGUS.timers[1].reached = false;
+	myGUS.timers[0].running = false;
+	myGUS.timers[1].running = false;
 
-		myGUS.timers[0].value = 0xff;
-		myGUS.timers[1].value = 0xff;
-		myGUS.timers[0].delay = 0.080f;
-		myGUS.timers[1].delay = 0.320f;
+	myGUS.timers[0].value = 0xff;
+	myGUS.timers[1].value = 0xff;
+	myGUS.timers[0].delay = 0.080f;
+	myGUS.timers[1].delay = 0.320f;
 
-		myGUS.ChangeIRQDMA = false;
-		myGUS.mixControl = 0x0b; // latches enabled, LINEs disabled
-		// Stop all channels
-		for (const auto channel : guschan) {
-			channel->CurrentVolIndex = 0u;
-			channel->WriteWaveCtrl(0x1);
-			channel->WriteRampCtrl(0x1);
-			channel->WritePanPot(0x7);
-		}
-		myGUS.IRQChan = 0;
-		myGUS.peak_amplitude = 1.0f;
+	myGUS.ChangeIRQDMA = false;
+	myGUS.mixControl = 0x0b; // latches enabled, LINEs disabled
+	// Stop all channels
+	for (const auto channel : guschan) {
+		channel->CurrentVolIndex = 0u;
+		channel->WriteWaveCtrl(0x1);
+		channel->WriteRampCtrl(0x1);
+		channel->WritePanPot(0x7);
 	}
+	myGUS.gCurChannel = 0u;
+	myGUS.IRQChan = 0;
+	myGUS.peak_amplitude = 1.0f;
+
 	if ((myGUS.gRegData & 0x4) != 0) {
 		myGUS.irqenabled = true;
 	} else {
 		myGUS.irqenabled = false;
 	}
+	// Clear the registers
+	myGUS.gRegSelect = 0u;
+	myGUS.gRegData = 0u;
 }
 
 static inline void GUS_CheckIRQ()
@@ -645,6 +648,7 @@ static void ExecuteGlobRegister()
 		gus_chan->Enable(true);
 		DEBUG_LOG_MSG("GUS: Activated %u voices running at %u Hz",
 		              myGUS.ActiveChannels, myGUS.basefreq);
+
 		break;
 	case 0x10: // Undocumented register used in Fast Tracker 2
 		break;
@@ -1035,9 +1039,7 @@ public:
 		}
 		// Register the Mixer CallBack
 		gus_chan = MixerChan.Install(GUS_CallBack, 0, "GUS");
-		myGUS.gRegData = 0x1;
 		GUSReset();
-		myGUS.gRegData = 0x0;
 		const Bitu portat = 0x200 + GUS_BASE;
 
 		// ULTRASND=Port,DMA1,DMA2,IRQ1,IRQ2
@@ -1061,10 +1063,8 @@ public:
 		if (!section->Get_bool("gus"))
 			return;
 
-		myGUS.gRegData = 0x1;
 		GUSReset();
-		myGUS.gRegData=0x0;
-	
+
 		for (auto voice : guschan)
 			delete voice;
 	}
